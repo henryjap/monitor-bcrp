@@ -68,12 +68,14 @@ def save_to_cache(code: str, df: pd.DataFrame):
 
 
 def load_local_bulk_cache() -> dict:
-    """Load all cached series into memory (codes only)."""
+    """Load all cached series with their max date."""
     try:
         init_db()
         with sqlite3.connect(local_series_db_path()) as conn:
-            rows = conn.execute("SELECT DISTINCT codigo FROM series_data").fetchall()
-            return {r[0]: True for r in rows}
+            rows = conn.execute(
+                "SELECT codigo, MAX(fecha) as max_fecha FROM series_data GROUP BY codigo"
+            ).fetchall()
+            return {r[0]: r[1] for r in rows}
     except Exception:
         return {}
 
@@ -153,62 +155,132 @@ def main():
     if not missing_codes:
         print("\n✅ All active series already cached. Running incremental update only.")
 
-    # 4. Date range — always full history to catch backward revisions
+    # 4. Determine what to download for each series
     end = date.today()
-    start = date(1900, 1, 1)
-    print(f"  📅 Full history: {start} → {end} (catches BCRP backward revisions)")
+    cache_state = load_local_bulk_cache()
+    twenty_months_ago = date(
+        end.year - 2, end.month + 4 if end.month <= 8 else end.month - 8, 1
+    )
+    if twenty_months_ago.month > end.month:
+        twenty_months_ago = twenty_months_ago.replace(year=twenty_months_ago.year - 1)
+
+    codes_new = []  # never downloaded → full history from 1900
+    codes_update = []  # has cache but old data → last 20 months
+    codes_skip = 0  # already up to date → skip
+
+    for r in filtered:
+        code = r["codigo"]
+        max_date = cache_state.get(code)
+        if max_date is None:
+            codes_new.append(code)
+        elif str(max_date) < end.isoformat():
+            codes_update.append(code)
+        else:
+            codes_skip += 1
+
+    print(
+        f"\n  📊 Cache check: {codes_skip} up-to-date, {len(codes_update)} need update, {len(codes_new)} new"
+    )
     print()
 
-    # 5. Download ALL active series every time (BCRP revises historical data)
-    codes_to_fetch = all_active_codes
-    batch_size = 20
-    batches = [
-        codes_to_fetch[i : i + batch_size]
-        for i in range(0, len(codes_to_fetch), batch_size)
-    ]
-    total = len(codes_to_fetch)
+    # 5. Pass 1: download new series (full history)
     ok = 0
     fail = 0
     failed_codes = []
     errors = []
 
-    print(f"⚙️  Fetching {total} series in {len(batches)} batches of {batch_size}...\n")
-
-    for idx, batch in enumerate(batches, 1):
-        print(f"  [{idx}/{len(batches)}] batch of {len(batch)}...", end=" ", flush=True)
-        try:
-            series_map, meta_map = fetch_bcrp_batch_series(batch, start, end)
-            batch_ok = 0
-            for code in batch:
-                df = series_map.get(code, pd.DataFrame())
-                if df is not None and not df.empty:
-                    save_to_cache(code, df)
-                    batch_ok += 1
-                else:
-                    failed_codes.append(code)
-            ok += batch_ok
-            fail += len(batch) - batch_ok
-            print(f"{batch_ok}/{len(batch)} ok")
-        except Exception as e:
-            print(f"BATCH FAILED: {e}")
-            for code in batch:
-                try:
-                    df, meta = fetch_bcrp_series(code, start, end)
+    if codes_new:
+        print(f"⚙️  Downloading {len(codes_new)} NEW series (full history from 1900)...")
+        batch_size = 20
+        batches = [
+            codes_new[i : i + batch_size] for i in range(0, len(codes_new), batch_size)
+        ]
+        full_start = date(1900, 1, 1)
+        for idx, batch in enumerate(batches, 1):
+            print(
+                f"  [new {idx}/{len(batches)}] batch of {len(batch)}...",
+                end=" ",
+                flush=True,
+            )
+            try:
+                series_map, _ = fetch_bcrp_batch_series(batch, full_start, end)
+                batch_ok = 0
+                for code in batch:
+                    df = series_map.get(code, pd.DataFrame())
                     if df is not None and not df.empty:
                         save_to_cache(code, df)
-                        ok += 1
+                        batch_ok += 1
                     else:
+                        failed_codes.append(code)
+                ok += batch_ok
+                fail += len(batch) - batch_ok
+                print(f"{batch_ok}/{len(batch)} ok")
+            except Exception as e:
+                print(f"BATCH FAILED: {e}")
+                for code in batch:
+                    try:
+                        df, meta = fetch_bcrp_series(code, full_start, end)
+                        if df is not None and not df.empty:
+                            save_to_cache(code, df)
+                            ok += 1
+                        else:
+                            fail += 1
+                            failed_codes.append(code)
+                    except Exception as e2:
                         fail += 1
                         failed_codes.append(code)
-                except Exception as e2:
-                    fail += 1
-                    failed_codes.append(code)
-                    errors.append(f"{code}: {e2}")
-                time.sleep(0.2)
-            print(f"     → retried individually")
-        time.sleep(0.3)
+                        errors.append(f"{code}: {e2}")
+                    time.sleep(0.2)
+            time.sleep(0.3)
 
-    # 6. Retry pass for individual failed codes (uses /esp endpoint)
+    # 6. Pass 2: download updated series (last 20 months — catches backward revisions)
+    if codes_update:
+        print(
+            f"\n⚙️  Updating {len(codes_update)} series (last 20 months since {twenty_months_ago})..."
+        )
+        batch_size = 20
+        batches = [
+            codes_update[i : i + batch_size]
+            for i in range(0, len(codes_update), batch_size)
+        ]
+        for idx, batch in enumerate(batches, 1):
+            print(
+                f"  [upd {idx}/{len(batches)}] batch of {len(batch)}...",
+                end=" ",
+                flush=True,
+            )
+            try:
+                series_map, _ = fetch_bcrp_batch_series(batch, twenty_months_ago, end)
+                batch_ok = 0
+                for code in batch:
+                    df = series_map.get(code, pd.DataFrame())
+                    if df is not None and not df.empty:
+                        save_to_cache(code, df)
+                        batch_ok += 1
+                    else:
+                        failed_codes.append(code)
+                ok += batch_ok
+                fail += len(batch) - batch_ok
+                print(f"{batch_ok}/{len(batch)} ok")
+            except Exception as e:
+                print(f"BATCH FAILED: {e}")
+                for code in batch:
+                    try:
+                        df, meta = fetch_bcrp_series(code, twenty_months_ago, end)
+                        if df is not None and not df.empty:
+                            save_to_cache(code, df)
+                            ok += 1
+                        else:
+                            fail += 1
+                            failed_codes.append(code)
+                    except Exception as e2:
+                        fail += 1
+                        failed_codes.append(code)
+                        errors.append(f"{code}: {e2}")
+                    time.sleep(0.2)
+            time.sleep(0.3)
+
+    # 7. Retry pass for individual failed codes (uses /esp endpoint)
     if failed_codes:
         unique_failed = sorted(set(failed_codes))
         print(f"\n🔁 Retry pass: {len(unique_failed)} codes individually...")
@@ -216,7 +288,7 @@ def main():
         for idx, code in enumerate(unique_failed, 1):
             print(f"  [{idx}/{len(unique_failed)}] {code}...", end=" ", flush=True)
             try:
-                df, meta = fetch_bcrp_series(code, start, end)
+                df, meta = fetch_bcrp_series(code, date(1900, 1, 1), end)
                 if df is not None and not df.empty:
                     save_to_cache(code, df)
                     retry_ok += 1
@@ -230,6 +302,8 @@ def main():
             time.sleep(0.3)
         print(f"  Retry recovered: {retry_ok}/{len(unique_failed)}")
 
+    total_attempted = len(codes_new) + len(codes_update)
+
     # 7. Final stats
     init_db()
     try:
@@ -242,7 +316,7 @@ def main():
         count, total_rows = 0, 0
 
     print(f"\n{'=' * 60}")
-    print(f"✅ Downloaded: {ok} | Failed: {fail} | Total: {total}")
+    print(f"✅ Downloaded: {ok} | Failed: {fail} | Attempted: {total_attempted}")
     print(f"📊 Cache DB: {count} unique series, {total_rows} observations")
 
     if errors:
@@ -259,7 +333,7 @@ def main():
         "failed": fail,
         "cache_series": count,
         "cache_obs": total_rows,
-        "start": start.isoformat(),
+        "start": "1900-01-01",
         "end": end.isoformat(),
     }
     with open(DATA_CACHE_DIR / "ci_download_summary.json", "w") as f:
@@ -277,7 +351,7 @@ def main():
         pass
 
     print(f"\n🏁 Done at {datetime.now():%H:%M:%S}")
-    sys.exit(0 if fail < total * 0.8 else 1)
+    sys.exit(0 if fail < total_attempted * 0.8 else 1)
 
 
 if __name__ == "__main__":
