@@ -149,7 +149,17 @@ def main():
     print(f"  🗄️  Already in cache DB: {already} series")
 
     end = date.today()
-    start = date(1900, 1, 1)  # Full history from beginning of each series
+
+    # Incremental: only download what's missing
+    last_run_file = DATA_CACHE_DIR / "last_run_date.txt"
+    if already > 0 and last_run_file.exists():
+        last_date = date.fromisoformat(last_run_file.read_text().strip())
+        start = last_date  # Will only fetch data after this date
+        print(f"  🔄 Incremental mode — fetching since {start}")
+    else:
+        start = date(1900, 1, 1)
+        print(f"  🆕 First run — full history from {start}")
+
     print(f"  📅 Range: {start} → {end}")
     print()
 
@@ -233,6 +243,11 @@ def main():
             print(f"  • {e}")
         if len(errors) > 20:
             print(f"  ... and {len(errors) - 20} more")
+
+    # Save last successful run date for incremental mode
+    with open(DATA_CACHE_DIR / "last_run_date.txt", "w") as f:
+        f.write(end.isoformat())
+    print(f"  📅 Incremental marker → {end.isoformat()}")
 
     # Save summaries
     DATA_CACHE_DIR.mkdir(parents=True, exist_ok=True)
