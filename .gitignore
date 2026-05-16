@@ -10,3 +10,11 @@ cache_status.csv
 .DS_Store
 ~$*
 nul
+# Root-level duplicates (real files are in monitor_bcrp_python/)
+/*.py
+/*.csv
+/*.txt
+/*.bat
+/*.vbs
+/*.md
+/*.xlsx
