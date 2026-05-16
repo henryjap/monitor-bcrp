@@ -173,11 +173,12 @@ def main():
         if any(w in f for w in ["semanal", "sem"]):
             return 10
         if any(w in f for w in ["mensual", "men"]):
-            return 75  # ~2.5 meses (ej: PBI se publica con 2 meses de rezago)
+            return 45  # ~1.5 meses, luego quick check confirma
         if any(w in f for w in ["trimestral", "trim"]):
-            return 150  # ~5 meses
+            return 100
         if any(w in f for w in ["anual", "anu"]):
-            return 460  # ~15 meses
+            return 370
+        return 60
         return 60
 
     codes_new = []  # never downloaded → full history from 1900
@@ -261,15 +262,53 @@ def main():
                     time.sleep(0.2)
             time.sleep(0.3)
 
-    # 6. Pass 2: download updated series (last 20 months — catches backward revisions)
+    # 6. Quick check: for outdated series, peek last 3 months to confirm new data exists
+    confirmed_update = []
     if codes_update:
         print(
-            f"\n⚙️  Updating {len(codes_update)} series (last 20 months since {twenty_months_ago})..."
+            f"\n🔍 Quick check: probing {len(codes_update)} series (last 3 months)..."
+        )
+        three_months_ago = (
+            date(end.year, end.month - 3, 1)
+            if end.month > 3
+            else date(end.year - 1, end.month + 9, 1)
+        )
+        check_batches = [
+            codes_update[i : i + 20] for i in range(0, len(codes_update), 20)
+        ]
+        for idx, batch in enumerate(check_batches, 1):
+            print(
+                f"  [check {idx}/{len(check_batches)}] batch of {len(batch)}...",
+                end=" ",
+                flush=True,
+            )
+            try:
+                series_map, _ = fetch_bcrp_batch_series(batch, three_months_ago, end)
+                for code in batch:
+                    df = series_map.get(code, pd.DataFrame())
+                    if df is not None and not df.empty:
+                        save_to_cache(code, df)
+                        confirmed_update.append(code)
+                print(f"confirmed {len(confirmed_update)}")
+            except Exception:
+                # If check batch fails, still try full update for these codes
+                confirmed_update.extend(batch)
+                print(f"batch failed, queued for retry")
+            time.sleep(0.2)
+        print(f"  → {len(confirmed_update)}/{len(codes_update)} have new data")
+        codes_to_full_update = confirmed_update
+    else:
+        codes_to_full_update = []
+
+    # 7. Full update for confirmed series (last 20 months — catches backward revisions)
+    if codes_to_full_update:
+        print(
+            f"\n⚙️  Updating {len(codes_to_full_update)} series (last 20 months since {twenty_months_ago})..."
         )
         batch_size = 20
         batches = [
-            codes_update[i : i + batch_size]
-            for i in range(0, len(codes_update), batch_size)
+            codes_to_full_update[i : i + batch_size]
+            for i in range(0, len(codes_to_full_update), batch_size)
         ]
         for idx, batch in enumerate(batches, 1):
             print(
@@ -308,7 +347,7 @@ def main():
                     time.sleep(0.2)
             time.sleep(0.3)
 
-    # 7. Retry pass for individual failed codes (uses /esp endpoint)
+    # 8. Retry pass for individual failed codes (uses /esp endpoint)
     if failed_codes:
         unique_failed = sorted(set(failed_codes))
         print(f"\n🔁 Retry pass: {len(unique_failed)} codes individually...")
@@ -332,7 +371,7 @@ def main():
 
     total_attempted = len(codes_new) + len(codes_update)
 
-    # 7. Final stats
+    # 9. Final stats
     init_db()
     try:
         with sqlite3.connect(local_series_db_path()) as conn:
