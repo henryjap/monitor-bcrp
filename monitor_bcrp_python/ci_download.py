@@ -173,11 +173,11 @@ def main():
         if any(w in f for w in ["semanal", "sem"]):
             return 10
         if any(w in f for w in ["mensual", "men"]):
-            return 35
+            return 75  # ~2.5 meses (ej: PBI se publica con 2 meses de rezago)
         if any(w in f for w in ["trimestral", "trim"]):
-            return 100
+            return 150  # ~5 meses
         if any(w in f for w in ["anual", "anu"]):
-            return 370
+            return 460  # ~15 meses
         return 60
 
     codes_new = []  # never downloaded → full history from 1900
