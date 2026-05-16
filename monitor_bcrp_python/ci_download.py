@@ -153,20 +153,14 @@ def main():
     if not missing_codes:
         print("\n✅ All active series already cached. Running incremental update only.")
 
-    # 4. Date range
+    # 4. Date range — always full history to catch backward revisions
     end = date.today()
-    last_run_file = DATA_CACHE_DIR / "last_run_date.txt"
-    if bulk_cache and last_run_file.exists():
-        start = date.fromisoformat(last_run_file.read_text().strip())
-        print(f"  🔄 Incremental mode (since {start})")
-    else:
-        start = date(1900, 1, 1)
-        print(f"  🆕 Full download from {start}")
-    print(f"  📅 Range: {start} → {end}")
+    start = date(1900, 1, 1)
+    print(f"  📅 Full history: {start} → {end} (catches BCRP backward revisions)")
     print()
 
-    # 5. Download in batches — only missing codes OR incremental for all active
-    codes_to_fetch = missing_codes if missing_codes else all_active_codes
+    # 5. Download ALL active series every time (BCRP revises historical data)
+    codes_to_fetch = all_active_codes
     batch_size = 20
     batches = [
         codes_to_fetch[i : i + batch_size]
@@ -256,11 +250,8 @@ def main():
         for e in errors[:20]:
             print(f"  • {e}")
 
-    # Save markers
+    # Save summary
     DATA_CACHE_DIR.mkdir(parents=True, exist_ok=True)
-    with open(DATA_CACHE_DIR / "last_run_date.txt", "w") as f:
-        f.write(end.isoformat())
-
     summary = {
         "date": datetime.now().isoformat(),
         "total_active": len(filtered),
