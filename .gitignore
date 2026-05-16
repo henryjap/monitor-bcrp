@@ -1,0 +1,12 @@
+.venv/
+__pycache__/
+*.pyc
+data_cache/
+*.db
+series_cacheadas_bcrp.csv
+series_con_error_api.csv
+series_faltantes_cache_bcrp.csv
+cache_status.csv
+.DS_Store
+~$*
+nul

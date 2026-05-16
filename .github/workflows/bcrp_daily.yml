@@ -1,0 +1,56 @@
+name: BCRP Daily Data Download
+
+on:
+  schedule:
+    - cron: '0 6 * * *'
+  workflow_dispatch:
+
+env:
+  PYTHON_VERSION: '3.11'
+
+jobs:
+  download:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Install dependencies
+        working-directory: monitor_bcrp_python
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Download ALL BCRP series from metadata
+        working-directory: monitor_bcrp_python
+        run: python ci_download.py
+        continue-on-error: true
+
+      - name: Vacuum and compress cache DB
+        run: python ci_vacuum.py
+
+      - name: Archive DB
+        run: tar -czf bcrp_cache_db.tar.gz monitor_bcrp_python/data_cache/series_raw/series_cache.db 2>/dev/null || true
+
+      - name: Upload cache DB
+        uses: actions/upload-artifact@v4
+        with:
+          name: bcrp-cache-db
+          path: bcrp_cache_db.tar.gz
+          retention-days: 30
+          if-no-files-found: warn
+
+      - name: Upload summary
+        uses: actions/upload-artifact@v4
+        with:
+          name: bcrp-download-summary
+          path: |
+            monitor_bcrp_python/data_cache/ci_download_summary.json
+            monitor_bcrp_python/data_cache/ci_cache_stats.csv
+          retention-days: 90
+          if-no-files-found: warn

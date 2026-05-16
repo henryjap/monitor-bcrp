@@ -1,0 +1,65 @@
+MONITOR MAXIMIXE DATA
+=====================
+
+Uso rapido en Windows
+---------------------
+
+1. Descomprima el ZIP en una carpeta local, por ejemplo en Documentos.
+2. Haga doble clic en "Monitor MAXIMIXE Data.vbs".
+3. La primera vez se creara una carpeta ".venv" y se instalaran dependencias.
+4. Espere a que se abra el navegador con la app.
+5. Mientras use la app, no cierre la ventana de consola.
+
+Requisito
+---------
+
+La PC debe tener Python 3.10 o superior instalado.
+Si no lo tiene, instalelo desde:
+
+https://www.python.org/downloads/
+
+Durante la instalacion marque la opcion:
+
+Add python.exe to PATH
+
+Archivos importantes
+--------------------
+
+- app.py: interfaz del aplicativo.
+- bcrp_monitor_core.py: motor de consulta y analisis.
+- ejecutar_monitor.bat: arranque con consola visible.
+- Monitor MAXIMIXE Data.vbs: arranque con consola minimizada.
+- reinstalar_dependencias.bat: reinstala librerias si algo falla.
+- BCRPData-metadata-20260509-181936.csv: metadatos base.
+- catalogo_bcrp_monitor_264.csv: catalogo inicial.
+- overrides_clasificacion_bcrp.csv: correcciones manuales.
+
+Si la app no abre
+-----------------
+
+1. Ejecute "reinstalar_dependencias.bat".
+2. Vuelva a abrir "Monitor MAXIMIXE Data.vbs".
+3. Si aparece un mensaje de Python no encontrado, reinstale Python marcando "Add python.exe to PATH".
+
+Velocidad de corridas
+---------------------
+
+La app guarda en cache local metadatos, descargas de la API y analisis por serie.
+La segunda vez que ejecute el mismo universo con el mismo rango de fechas deberia correr mas rapido.
+Si quiere forzar una actualizacion completa, abra "Avanzado" y use "Limpiar cache local".
+
+Agregar nuevas variables
+------------------------
+
+Si ya proceso un grupo de series y quiere sumar otras, use "Modo de corrida" > "Agregar nuevas series".
+Pegue o cargue solo los codigos nuevos. La app conserva lo ya procesado y evita duplicados.
+
+Actualizar datos nuevos
+-----------------------
+
+Si ya tiene una corrida cargada, use "Actualizar datos nuevos" para consultar la API solo desde la ultima fecha conocida de cada serie. La app primero revisa la frecuencia de cada variable, omite las que no pueden tener periodo nuevo, recuerda las revisiones sin cambios del dia y solo recalcula cuando encuentra observaciones nuevas o revisiones de datos.
+
+Metodologia de distancias
+-------------------------
+
+El monitor mide la posicion 0-100 del ultimo dato frente a minimos y maximos del año en curso, ventana movil e historico completo. Esa medicion ayuda a clasificar si la serie esta al alza, normal o a la baja y aparece en tarjetas y graficos de exploracion.
