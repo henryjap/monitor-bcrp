@@ -149,7 +149,7 @@ def main():
     print(f"  🗄️  Already in cache DB: {already} series")
 
     end = date.today()
-    start = date(2015, 1, 1)
+    start = date(1900, 1, 1)  # Full history from beginning of each series
     print(f"  📅 Range: {start} → {end}")
     print()
 
