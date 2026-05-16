@@ -155,7 +155,7 @@ def main():
     if not missing_codes:
         print("\n✅ All active series already cached. Running incremental update only.")
 
-    # 4. Determine what to download for each series
+    # 4. Determine what to download for each series, frequency-aware
     end = date.today()
     cache_state = load_local_bulk_cache()
     twenty_months_ago = date(
@@ -164,9 +164,37 @@ def main():
     if twenty_months_ago.month > end.month:
         twenty_months_ago = twenty_months_ago.replace(year=twenty_months_ago.year - 1)
 
+    freq_map = {r["codigo"]: r["frecuencia"] for r in filtered}
+
+    def grace_days(code: str) -> int:
+        f = freq_map.get(code, "").lower()
+        if any(w in f for w in ["diar", "dia"]):
+            return 1
+        if any(w in f for w in ["semanal", "sem"]):
+            return 10
+        if any(w in f for w in ["mensual", "men"]):
+            return 35
+        if any(w in f for w in ["trimestral", "trim"]):
+            return 100
+        if any(w in f for w in ["anual", "anu"]):
+            return 370
+        return 60
+
     codes_new = []  # never downloaded → full history from 1900
     codes_update = []  # has cache but old data → last 20 months
     codes_skip = 0  # already up to date → skip
+
+    from datetime import timedelta
+
+    for r in filtered:
+        code = r["codigo"]
+        max_date = cache_state.get(code)
+        if max_date is None:
+            codes_new.append(code)
+        elif str(max_date) >= (end - timedelta(days=grace_days(code))).isoformat():
+            codes_skip += 1
+        else:
+            codes_update.append(code)
 
     for r in filtered:
         code = r["codigo"]
