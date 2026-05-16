@@ -171,6 +171,7 @@ def main():
     ok = 0
     fail = 0
     skipped = 0
+    failed_codes = []
     errors = []
     last_save = time.time()
 
@@ -192,6 +193,8 @@ def main():
                 if df is not None and not df.empty:
                     save_to_cache(code, df)
                     batch_ok += 1
+                else:
+                    failed_codes.append(code)
             ok += batch_ok
             fail += len(group) - batch_ok
             print(f"{batch_ok}/{len(group)} ok")
@@ -221,6 +224,28 @@ def main():
             print(f"     {batch_ok}/{len(group)} ok (individual fallback)")
 
         time.sleep(0.3)
+
+    # Retry pass: attempt failed codes individually (they may work with /esp endpoint)
+    if failed_codes:
+        unique_failed = list(set(failed_codes))
+        print(f"\n🔁 Retry pass: {len(unique_failed)} codes individually...")
+        retry_ok = 0
+        for idx, code in enumerate(unique_failed, 1):
+            print(f"  [{idx}/{len(unique_failed)}] {code}...", end=" ", flush=True)
+            try:
+                df, meta = fetch_bcrp_series(code, start, end)
+                if df is not None and not df.empty:
+                    save_to_cache(code, df)
+                    retry_ok += 1
+                    ok += 1
+                    fail -= 1
+                    print("✅")
+                else:
+                    print("❌ no data")
+            except Exception as e:
+                print(f"❌ {str(e)[:80]}")
+            time.sleep(0.3)
+        print(f"  Retry result: {retry_ok}/{len(unique_failed)} recovered")
 
     # Final stats
     init_db()
