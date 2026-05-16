@@ -31,8 +31,10 @@ jobs:
         run: python ci_download.py
         continue-on-error: true
 
-      - name: Vacuum and compress cache DB
+      - name: Vacuum cache DB
+        working-directory: monitor_bcrp_python
         run: python ci_vacuum.py
+        continue-on-error: true
 
       - name: Archive DB
         run: tar -czf bcrp_cache_db.tar.gz monitor_bcrp_python/data_cache/series_raw/series_cache.db 2>/dev/null || true
