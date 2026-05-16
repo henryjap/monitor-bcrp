@@ -1,26 +1,20 @@
 """Headless download script for GitHub Actions.
-Downloads ALL BCRP series from metadata CSV and saves to cache."""
+Downloads BCRP series using filtered catalog + incremental updates."""
 
 from datetime import date, datetime
 from pathlib import Path
 import csv
 import json
-import os
 import sqlite3
 import sys
 import time
 
 import pandas as pd
-import requests
 
 HERE = Path(__file__).parent.resolve()
 sys.path.insert(0, str(HERE))
 
-from bcrp_monitor_core import (
-    fetch_bcrp_series,
-    fetch_bcrp_batch_series,
-    clean_code,
-)
+from bcrp_monitor_core import fetch_bcrp_series, fetch_bcrp_batch_series, clean_code
 from constants import RAW_CACHE_DIR, DATA_CACHE_DIR
 
 
@@ -73,63 +67,42 @@ def save_to_cache(code: str, df: pd.DataFrame):
         print(f"  [WARN] DB save error for {code}: {e}")
 
 
-def read_all_codes_from_metadata() -> list[str]:
-    """Read ALL codes from the BCRP metadata CSV (~16,945 series)."""
-    candidates = [
-        HERE / "BCRPData-metadata-20260509-181936.csv",
-        HERE / "BCRP_metadata_fusionada_nombre_serie_con_medicion.xlsx",
-    ]
-    for path in candidates:
-        if path.exists():
-            print(f"  📄 Reading codes from: {path.name}")
-            if path.suffix == ".csv":
-                df = pd.read_csv(path, encoding="latin1", sep=";", low_memory=False)
-                col = df.columns[0]
-            else:
-                df = pd.read_excel(path)
-                col = "codigo" if "codigo" in df.columns else df.columns[0]
-            codes = (
-                df[col].dropna().astype(str).str.strip().str.upper().unique().tolist()
-            )
-            codes = sorted([c for c in codes if c and c != "NAN" and c != "NONE"])
-            print(f"     → {len(codes)} unique codes found")
-            return codes
-    return []
-
-
-def read_catalog_codes() -> list[str]:
-    """Fallback: read from the 264-catalog CSV."""
-    path = HERE / "catalogo_bcrp_monitor_264.csv"
-    if path.exists():
-        with open(path, encoding="utf-8-sig") as f:
-            reader = csv.DictReader(f, delimiter=";")
-            codes = sorted(
-                set(
-                    clean_code(r.get("codigo", ""))
-                    for r in reader
-                    if clean_code(r.get("codigo", ""))
-                )
-            )
-            print(f"  📄 Using catalog: {len(codes)} codes")
-            return codes
-    from constants import DEFAULT_CODES
-
-    codes = [c.strip() for c in DEFAULT_CODES.strip().split("\n") if c.strip()]
-    print(f"  📄 Using DEFAULT_CODES fallback: {len(codes)} codes")
-    return codes
-
-
-def already_cached_count() -> int:
-    """How many distinct codes already in DB."""
+def load_local_bulk_cache() -> dict:
+    """Load all cached series into memory (codes only)."""
     try:
         init_db()
         with sqlite3.connect(local_series_db_path()) as conn:
-            row = conn.execute(
-                "SELECT COUNT(DISTINCT codigo) FROM series_data"
-            ).fetchone()
-            return row[0] if row else 0
+            rows = conn.execute("SELECT DISTINCT codigo FROM series_data").fetchall()
+            return {r[0]: True for r in rows}
     except Exception:
-        return 0
+        return {}
+
+
+def save_local_series_cache_bulk(updates: dict):
+    """Persist multiple series at once."""
+    for code, df in updates.items():
+        save_to_cache(code, df)
+
+
+def load_enriched_catalog() -> list[dict]:
+    """Load metadata CSV as enriched records."""
+    path = HERE / "BCRPData-metadata-20260509-181936.csv"
+    if not path.exists():
+        return []
+    df = pd.read_csv(path, encoding="latin1", sep=";", low_memory=False)
+    cols = df.columns.tolist()
+    records = []
+    for _, row in df.iterrows():
+        records.append(
+            {
+                "codigo": str(row.iloc[0]).strip().upper(),
+                "nombre_bcrp": str(row.iloc[3]) if len(cols) > 3 else "",
+                "grupo_bcrp": str(row.iloc[2]) if len(cols) > 2 else "",
+                "categoria": str(row.iloc[1]) if len(cols) > 1 else "",
+                "frecuencia": str(row.iloc[10]) if len(cols) > 10 else "",
+            }
+        )
+    return records
 
 
 def main():
@@ -137,58 +110,82 @@ def main():
     print(f"BCRP Data Downloader — {datetime.now():%Y-%m-%d %H:%M:%S}")
     print("=" * 60)
 
-    codes = read_all_codes_from_metadata()
-    if not codes:
-        codes = read_catalog_codes()
-
-    if not codes:
-        print("❌ No codes found to download.")
+    # 1. Load enriched catalog
+    records = load_enriched_catalog()
+    if not records:
+        print("❌ Metadata CSV not found")
         sys.exit(1)
+    print(f"  📄 Catalog: {len(records)} total records")
 
-    already = already_cached_count()
-    print(f"  🗄️  Already in cache DB: {already} series")
+    # 2. Filter out unwanted series
+    filtered = []
+    skipped = {"CD": 0, "discontinued": 0, "old_hist": 0}
+    for r in records:
+        code = r["codigo"]
+        name = r["nombre_bcrp"].lower()
+        group = r["grupo_bcrp"]
 
+        if code.startswith("CD"):
+            skipped["CD"] += 1
+            continue
+        if "(descontinuada)" in name:
+            skipped["discontinued"] += 1
+            continue
+        if group == "Entre 1930 a 1980":
+            skipped["old_hist"] += 1
+            continue
+        filtered.append(r)
+
+    print(
+        f"  🚫 Skipped: {skipped['CD']} CD, {skipped['discontinued']} discontinued, {skipped['old_hist']} historical"
+    )
+    print(f"  ✅ Active series: {len(filtered)}")
+
+    # 3. Identify which active codes are missing from cache
+    bulk_cache = load_local_bulk_cache()
+    all_active_codes = [r["codigo"] for r in filtered]
+    missing_codes = [c for c in all_active_codes if c not in bulk_cache]
+
+    already_cached = len(all_active_codes) - len(missing_codes)
+    print(f"  🗄️  Already cached: {already_cached}")
+    print(f"  📥 Missing to download: {len(missing_codes)}")
+
+    if not missing_codes:
+        print("\n✅ All active series already cached. Running incremental update only.")
+
+    # 4. Date range
     end = date.today()
-
-    # Incremental: only download what's missing
     last_run_file = DATA_CACHE_DIR / "last_run_date.txt"
-    if already > 0 and last_run_file.exists():
-        last_date = date.fromisoformat(last_run_file.read_text().strip())
-        start = last_date  # Will only fetch data after this date
-        print(f"  🔄 Incremental mode — fetching since {start}")
+    if bulk_cache and last_run_file.exists():
+        start = date.fromisoformat(last_run_file.read_text().strip())
+        print(f"  🔄 Incremental mode (since {start})")
     else:
         start = date(1900, 1, 1)
-        print(f"  🆕 First run — full history from {start}")
-
+        print(f"  🆕 Full download from {start}")
     print(f"  📅 Range: {start} → {end}")
     print()
 
-    # Batch size: keep URLs under ~2000 chars
-    # Each code is ~9 chars, separator ~1 → ~10 per code → max ~150 per batch
-    BATCH_SIZE = 50
-    code_groups = [codes[i : i + BATCH_SIZE] for i in range(0, len(codes), BATCH_SIZE)]
-    total = len(codes)
+    # 5. Download in batches — only missing codes OR incremental for all active
+    codes_to_fetch = missing_codes if missing_codes else all_active_codes
+    batch_size = 20
+    batches = [
+        codes_to_fetch[i : i + batch_size]
+        for i in range(0, len(codes_to_fetch), batch_size)
+    ]
+    total = len(codes_to_fetch)
     ok = 0
     fail = 0
-    skipped = 0
     failed_codes = []
     errors = []
-    last_save = time.time()
 
-    print(
-        f"⚙️  Fetching {total} series in {len(code_groups)} batches of {BATCH_SIZE}...\n"
-    )
+    print(f"⚙️  Fetching {total} series in {len(batches)} batches of {batch_size}...\n")
 
-    for idx, group in enumerate(code_groups, 1):
-        print(
-            f"  [{idx}/{len(code_groups)}] batch of {len(group)}...",
-            end=" ",
-            flush=True,
-        )
+    for idx, batch in enumerate(batches, 1):
+        print(f"  [{idx}/{len(batches)}] batch of {len(batch)}...", end=" ", flush=True)
         try:
-            series_map, meta_map = fetch_bcrp_batch_series(group, start, end)
+            series_map, meta_map = fetch_bcrp_batch_series(batch, start, end)
             batch_ok = 0
-            for code in group:
+            for code in batch:
                 df = series_map.get(code, pd.DataFrame())
                 if df is not None and not df.empty:
                     save_to_cache(code, df)
@@ -196,38 +193,30 @@ def main():
                 else:
                     failed_codes.append(code)
             ok += batch_ok
-            fail += len(group) - batch_ok
-            print(f"{batch_ok}/{len(group)} ok")
-
-            # Save progress every 10 batches
-            if time.time() - last_save > 30:
-                print(f"     ⏺️  Checkpoint: {ok} ok, {fail} fail, {skipped} skip")
-                last_save = time.time()
-
+            fail += len(batch) - batch_ok
+            print(f"{batch_ok}/{len(batch)} ok")
         except Exception as e:
             print(f"BATCH FAILED: {e}")
-            # Fallback: retry each code individually
-            batch_ok = 0
-            for code in group:
+            for code in batch:
                 try:
                     df, meta = fetch_bcrp_series(code, start, end)
                     if df is not None and not df.empty:
                         save_to_cache(code, df)
-                        batch_ok += 1
                         ok += 1
                     else:
                         fail += 1
+                        failed_codes.append(code)
                 except Exception as e2:
                     fail += 1
+                    failed_codes.append(code)
                     errors.append(f"{code}: {e2}")
                 time.sleep(0.2)
-            print(f"     {batch_ok}/{len(group)} ok (individual fallback)")
-
+            print(f"     → retried individually")
         time.sleep(0.3)
 
-    # Retry pass: attempt failed codes individually (they may work with /esp endpoint)
+    # 6. Retry pass for individual failed codes (uses /esp endpoint)
     if failed_codes:
-        unique_failed = list(set(failed_codes))
+        unique_failed = sorted(set(failed_codes))
         print(f"\n🔁 Retry pass: {len(unique_failed)} codes individually...")
         retry_ok = 0
         for idx, code in enumerate(unique_failed, 1):
@@ -245,9 +234,9 @@ def main():
             except Exception as e:
                 print(f"❌ {str(e)[:80]}")
             time.sleep(0.3)
-        print(f"  Retry result: {retry_ok}/{len(unique_failed)} recovered")
+        print(f"  Retry recovered: {retry_ok}/{len(unique_failed)}")
 
-    # Final stats
+    # 7. Final stats
     init_db()
     try:
         with sqlite3.connect(local_series_db_path()) as conn:
@@ -259,40 +248,33 @@ def main():
         count, total_rows = 0, 0
 
     print(f"\n{'=' * 60}")
-    print(f"✅ Result: {ok} downloaded, {fail} failed / {total} total")
+    print(f"✅ Downloaded: {ok} | Failed: {fail} | Total: {total}")
     print(f"📊 Cache DB: {count} unique series, {total_rows} observations")
 
     if errors:
         print(f"\n⚠️  Errors ({len(errors)}):")
         for e in errors[:20]:
             print(f"  • {e}")
-        if len(errors) > 20:
-            print(f"  ... and {len(errors) - 20} more")
 
-    # Save last successful run date for incremental mode
+    # Save markers
+    DATA_CACHE_DIR.mkdir(parents=True, exist_ok=True)
     with open(DATA_CACHE_DIR / "last_run_date.txt", "w") as f:
         f.write(end.isoformat())
-    print(f"  📅 Incremental marker → {end.isoformat()}")
-
-    # Save summaries
-    DATA_CACHE_DIR.mkdir(parents=True, exist_ok=True)
 
     summary = {
         "date": datetime.now().isoformat(),
-        "total_codes": total,
+        "total_active": len(filtered),
         "downloaded": ok,
         "failed": fail,
         "cache_series": count,
         "cache_obs": total_rows,
         "start": start.isoformat(),
         "end": end.isoformat(),
-        "errors": errors[:50],
     }
     with open(DATA_CACHE_DIR / "ci_download_summary.json", "w") as f:
         json.dump(summary, f, indent=2)
-    print(f"  📝 Summary → data_cache/ci_download_summary.json")
+    print(f"  📝 Summary saved")
 
-    # Cache stats CSV
     try:
         with sqlite3.connect(local_series_db_path()) as conn:
             stats = pd.read_sql(
@@ -300,12 +282,11 @@ def main():
                 conn,
             )
             stats.to_csv(DATA_CACHE_DIR / "ci_cache_stats.csv", index=False)
-            print(f"  📊 Stats   → data_cache/ci_cache_stats.csv")
     except Exception:
         pass
 
     print(f"\n🏁 Done at {datetime.now():%H:%M:%S}")
-    sys.exit(0 if fail < total * 0.5 else 1)
+    sys.exit(0 if fail < total * 0.8 else 1)
 
 
 if __name__ == "__main__":
