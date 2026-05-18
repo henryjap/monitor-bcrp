@@ -1,0 +1,135 @@
+name: INEI Daily Data Download
+
+on:
+  schedule:
+    - cron: '0 7 * * *'
+  workflow_dispatch:
+
+env:
+  PYTHON_VERSION: '3.11'
+
+jobs:
+  download:
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Install dependencies
+        working-directory: monitor_bcrp_python
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Install Playwright Chromium
+        working-directory: monitor_bcrp_python
+        run: |
+          python -m playwright install --with-deps chromium
+
+      - name: Restore previous DB artifact
+        uses: actions/download-artifact@v4
+        continue-on-error: true
+        with:
+          name: inei-cache-db
+          path: ./
+
+      - name: Extract DB if artifact exists
+        working-directory: monitor_bcrp_python
+        run: |
+          if [ -f ../../inei_cache_db.tar.gz ]; then
+            tar -xzf ../../inei_cache_db.tar.gz -C ../../
+            echo "DB restored from previous artifact"
+          else
+            echo "No previous artifact, starting fresh"
+          fi
+        shell: bash
+
+      - name: Show pre-download status
+        working-directory: monitor_bcrp_python
+        run: python ineia_download_all.py --status
+        continue-on-error: true
+
+      - name: Explore Trimestral (once, skipped if already indexed)
+        working-directory: monitor_bcrp_python
+        run: |
+          python -c "
+          from inei_cache import INEICache
+          c = INEICache()
+          s = c.freq_catalog_status()
+          if s.get('Trimestral', 0) == 0:
+              n = c.update_freq_catalog('Trimestral')
+              print(f'Indexados {n} Trimestral')
+          else:
+              print(f'Trimestral ya indexado: {s[\"Trimestral\"]}')
+          "
+        continue-on-error: true
+
+      - name: Explore Mensual (once, skipped if already indexed)
+        working-directory: monitor_bcrp_python
+        run: |
+          python -c "
+          from inei_cache import INEICache
+          c = INEICache()
+          s = c.freq_catalog_status()
+          if s.get('Mensual', 0) == 0:
+              n = c.update_freq_catalog('Mensual')
+              print(f'Indexados {n} Mensual')
+          else:
+              print(f'Mensual ya indexado: {s[\"Mensual\"]}')
+          "
+        continue-on-error: true
+
+      - name: Explore Anual (once, skipped if already indexed)
+        working-directory: monitor_bcrp_python
+        run: |
+          python -c "
+          from inei_cache import INEICache
+          c = INEICache()
+          s = c.freq_catalog_status()
+          if s.get('Anual', 0) == 0:
+              n = c.update_freq_catalog('Anual')
+              print(f'Indexados {n} Anual')
+          else:
+              print(f'Anual ya indexado: {s[\"Anual\"]}')
+          "
+        continue-on-error: true
+
+      - name: Download — resume (Trimestral → Mensual → Anual, cada día avanza más)
+        working-directory: monitor_bcrp_python
+        run: python ineia_download_all.py --resume --delay 1.0
+        continue-on-error: true
+
+      - name: Show post-download status
+        working-directory: monitor_bcrp_python
+        run: python ineia_download_all.py --status
+        continue-on-error: true
+
+      - name: Vacuum cache DB
+        working-directory: monitor_bcrp_python
+        run: python ci_vacuum_inei.py
+        continue-on-error: true
+
+      - name: Archive DB
+        run: tar -czf inei_cache_db.tar.gz monitor_bcrp_python/data_cache/inei_raw/inei_cache.db 2>/dev/null || true
+
+      - name: Upload cache DB
+        uses: actions/upload-artifact@v4
+        with:
+          name: inei-cache-db
+          path: inei_cache_db.tar.gz
+          retention-days: 30
+          if-no-files-found: warn
+
+      - name: Upload summary
+        uses: actions/upload-artifact@v4
+        with:
+          name: inei-download-summary
+          path: |
+            monitor_bcrp_python/data_cache/inei_raw/download_all_summary.json
+          retention-days: 90
+          if-no-files-found: warn
