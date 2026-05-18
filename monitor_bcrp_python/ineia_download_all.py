@@ -97,9 +97,32 @@ def progress_summary(cache: INEICache, freq: str) -> dict:
     return {"total": total, "completado": done, "fallido": failed, "pendiente": pending}
 
 
+LOOKBACK_YEARS = 3  # años hacia atrás para descarga incremental
+
+
+def _incremental_start(cache: INEICache, rk: str, freq: str) -> str:
+    """Calcula año de inicio para descarga incremental.
+    - Si hay datos cacheados: pide desde (último año - LOOKBACK)
+      para cubrir revisiones retroactivas del INEI.
+    - Si no hay datos: año histórico completo."""
+    with sqlite3.connect(cache.db_path) as conn:
+        row = conn.execute(
+            "SELECT MAX(fecha) FROM inei_series WHERE rowkey = ? AND frequency = ?",
+            (rk, freq),
+        ).fetchone()
+    if row and row[0]:
+        latest_year = int(str(row[0])[:4])
+        start = max(latest_year - LOOKBACK_YEARS, 2000)
+        return str(start)
+    return str(HISTORICAL_START.get(freq, 2000))
+
+
 def download_loop(cache: INEICache, freq: str, chunk: int | None = None,
-                  total_chunks: int | None = None, delay: float = 1.5):
-    """Bucle de descarga con progreso."""
+                  total_chunks: int | None = None, delay: float = 1.5,
+                  deep: bool = False):
+    """Bucle de descarga con progreso.
+    Si deep=False, descarga incremental (solo últimos LOOKBACK años).
+    Si deep=True, descarga desde año histórico completo."""
     init_progress(cache, freq)
     pending = get_pending(cache, freq)
 
@@ -121,15 +144,19 @@ def download_loop(cache: INEICache, freq: str, chunk: int | None = None,
     for idx, item in enumerate(pending, 1):
         rk = item["rowkey"]
         lbl = item["label"] or rk
-        start_yr = str(HISTORICAL_START.get(freq, 2000))
         end_yr = str(date.today().year)
+        if deep:
+            start_yr = str(HISTORICAL_START.get(freq, 2000))
+        else:
+            start_yr = _incremental_start(cache, rk, freq)
 
         elapsed = time.time() - start_time
         rate = idx / elapsed if elapsed > 0 else 0
         eta = (total - idx) / rate if rate > 0 else 0
 
         print(f"  [{idx}/{total}] {lbl} ({rk})  "
-              f"[{elapsed/60:.0f}m ETA {eta/60:.0f}m]...", end=" ", flush=True)
+              f"[{elapsed/60:.0f}m ETA {eta/60:.0f}m] {start_yr}-{end_yr}...",
+              end=" ", flush=True)
 
         try:
             df = cache.fetch_and_cache(rk, freq, start_yr, end_yr)
@@ -178,6 +205,8 @@ def main():
                         help="Mostrar estado del progreso")
     parser.add_argument("--delay", type=float, default=1.5,
                         help="Delay entre requests (segundos)")
+    parser.add_argument("--deep", action="store_true",
+                        help="Re-descargar desde año histórico completo (no incremental)")
     args = parser.parse_args()
 
     cache = INEICache()
@@ -189,11 +218,12 @@ def main():
     if args.resume:
         # Reanudar frecuencias que tengan pendientes
         for freq in FREQUENCIES:
+            mode = "íntegra" if args.deep else "incremental"
             ps = progress_summary(cache, freq)
             pending_count = ps["pendiente"] + ps["fallido"]
             if pending_count > 0:
-                print(f"\n📥 Reanudando {freq} ({pending_count} pendientes)")
-                download_loop(cache, freq, delay=args.delay)
+                print(f"\n📥 Reanudando {freq} ({pending_count} pendientes, modo {mode})")
+                download_loop(cache, freq, delay=args.delay, deep=args.deep)
         return
 
     if not args.freq:
@@ -201,14 +231,15 @@ def main():
         parser.print_help()
         sys.exit(1)
 
+    mode = "íntegra" if args.deep else "incremental"
     if args.all:
-        print(f"\n📥 Descarga completa de {args.freq} desde "
-              f"{HISTORICAL_START.get(args.freq, 2000)}")
-        download_loop(cache, args.freq, delay=args.delay)
+        print(f"\n📥 Descarga {mode} de {args.freq}")
+        download_loop(cache, args.freq, delay=args.delay, deep=args.deep)
     elif args.chunk:
         n, total = args.chunk
-        print(f"\n📥 Chunk {n}/{total} de {args.freq}")
-        download_loop(cache, args.freq, chunk=n, total_chunks=total, delay=args.delay)
+        print(f"\n📥 Chunk {n}/{total} de {args.freq} ({mode})")
+        download_loop(cache, args.freq, chunk=n, total_chunks=total,
+                      delay=args.delay, deep=args.deep)
 
     # Resumen final
     print("\n=== Resumen final ===")
