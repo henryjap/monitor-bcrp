@@ -179,7 +179,6 @@ def main():
         if any(w in f for w in ["anual", "anu"]):
             return 370
         return 60
-        return 60
 
     codes_new = []  # never downloaded → full history from 1900
     codes_update = []  # has cache but old data → last 20 months
@@ -196,16 +195,6 @@ def main():
             codes_skip += 1
         else:
             codes_update.append(code)
-
-    for r in filtered:
-        code = r["codigo"]
-        max_date = cache_state.get(code)
-        if max_date is None:
-            codes_new.append(code)
-        elif str(max_date) < end.isoformat():
-            codes_update.append(code)
-        else:
-            codes_skip += 1
 
     print(
         f"\n  📊 Cache check: {codes_skip} up-to-date, {len(codes_update)} need update, {len(codes_new)} new"
@@ -347,27 +336,38 @@ def main():
                     time.sleep(0.2)
             time.sleep(0.3)
 
-    # 8. Retry pass for individual failed codes (uses /esp endpoint)
-    if failed_codes:
-        unique_failed = sorted(set(failed_codes))
-        print(f"\n🔁 Retry pass: {len(unique_failed)} codes individually...")
-        retry_ok = 0
-        for idx, code in enumerate(unique_failed, 1):
-            print(f"  [{idx}/{len(unique_failed)}] {code}...", end=" ", flush=True)
+    # 8. Retry loop — repite hasta eliminar todos los errores o sin progreso
+    MAX_RETRY_PASSES = 5
+    remaining = sorted(set(failed_codes))
+    pass_num = 0
+    while remaining and pass_num < MAX_RETRY_PASSES:
+        pass_num += 1
+        before = len(remaining)
+        print(f"\n🔁 Retry pass {pass_num}/{MAX_RETRY_PASSES}: {before} codes...")
+        recovered = 0
+        still_failing = []
+        for idx, code in enumerate(remaining, 1):
+            print(f"  [{idx}/{before}] {code}...", end=" ", flush=True)
             try:
                 df, meta = fetch_bcrp_series(code, date(1900, 1, 1), end)
                 if df is not None and not df.empty:
                     save_to_cache(code, df)
-                    retry_ok += 1
+                    recovered += 1
                     ok += 1
                     fail -= 1
                     print("✅")
                 else:
-                    print("❌ no data")
+                    still_failing.append(code)
+                    print("❌ sin datos")
             except Exception as e:
+                still_failing.append(code)
                 print(f"❌ {str(e)[:80]}")
-            time.sleep(0.3)
-        print(f"  Retry recovered: {retry_ok}/{len(unique_failed)}")
+            time.sleep(0.5)
+        remaining = still_failing
+        print(f"  Pass {pass_num}: recovered {recovered}/{before}, {len(remaining)} still failing")
+        if recovered == 0:
+            print("  ⛔ No progress, stopping retries")
+            break
 
     total_attempted = len(codes_new) + len(codes_update)
 
@@ -386,8 +386,12 @@ def main():
     print(f"✅ Downloaded: {ok} | Failed: {fail} | Attempted: {total_attempted}")
     print(f"📊 Cache DB: {count} unique series, {total_rows} observations")
 
+    if remaining:
+        print(f"\n⚠️  Códigos aún fallidos tras {pass_num} retry passes ({len(remaining)}):")
+        for code in remaining[:30]:
+            print(f"  • {code}")
     if errors:
-        print(f"\n⚠️  Errors ({len(errors)}):")
+        print(f"\n⚠️  Batch errors ({len(errors)}):")
         for e in errors[:20]:
             print(f"  • {e}")
 

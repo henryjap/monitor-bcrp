@@ -216,14 +216,21 @@ def main():
         return
 
     if args.resume:
-        # Reanudar frecuencias que tengan pendientes
         for freq in FREQUENCIES:
-            mode = "íntegra" if args.deep else "incremental"
             ps = progress_summary(cache, freq)
-            pending_count = ps["pendiente"] + ps["fallido"]
-            if pending_count > 0:
-                print(f"\n📥 Reanudando {freq} ({pending_count} pendientes, modo {mode})")
-                download_loop(cache, freq, delay=args.delay, deep=args.deep)
+            # Si no hay progreso registrado, inicializar desde freq_index
+            if ps["total"] == 0:
+                indicators = cache.get_indicators(frequency=freq)
+                if not indicators.empty:
+                    print(f"\n📥 Inicializando {freq} ({len(indicators)} indicadores)")
+                    init_progress(cache, freq)
+                    # Pasar deep=True en la primera pasada (cache vacío)
+                    download_loop(cache, freq, delay=args.delay, deep=True)
+            else:
+                pending_count = ps["pendiente"] + ps["fallido"]
+                if pending_count > 0:
+                    print(f"\n📥 Reanudando {freq} ({pending_count} pendientes)")
+                    download_loop(cache, freq, delay=args.delay, deep=args.deep)
         return
 
     if not args.freq:

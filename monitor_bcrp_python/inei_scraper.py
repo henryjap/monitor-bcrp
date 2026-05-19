@@ -148,10 +148,12 @@ class INEIScraper:
             page = self._page
             # 1. Cambiar frecuencia
             self._set_frequency(freq)
-            page.wait_for_timeout(2000)
+            page.wait_for_timeout(3000)
             page.wait_for_load_state("networkidle")
 
-            # 2. Expandir todo el árbol BFS
+            # 2. Expandir todo el árbol BFS — enfoque robusto:
+            #    repetir hasta 3 rondas consecutivas sin nuevos colapsados
+            stale = 0
             for _ in range(99):
                 has_collapsed = page.evaluate("""
                     () => {
@@ -163,8 +165,12 @@ class INEIScraper:
                     }
                 """)
                 if not has_collapsed:
-                    break
-                page.wait_for_timeout(1000)
+                    stale += 1
+                    if stale >= 3:
+                        break
+                else:
+                    stale = 0
+                page.wait_for_timeout(1500)
                 page.wait_for_load_state("networkidle")
 
             # 3. Extraer solo nodos con checkbox
