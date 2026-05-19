@@ -49,6 +49,8 @@ class SeriesMeta:
     codigo: str
     nombre: str = ""
     frecuencia: str = ""
+    nombre_bcrp: str = ""
+    frecuencia_bcrp: str = ""
     bloque: str = ""
     uso_analitico: str = ""
     tratamiento: str = "auto"
@@ -56,10 +58,12 @@ class SeriesMeta:
     categoria_bcrp: str = ""
     grupo_bcrp: str = ""
     seccion_bcrp: str = ""
+    grupo_publicacion_bcrp: str = ""
     unidad_medida: str = ""
     escala: str = ""
     fecha_actualizacion_meta: str = ""
     fecha_inicio_meta: str = ""
+    fecha_creacion_meta: str = ""
     fecha_fin_meta: str = ""
     sentido_economico: str = ""
     prioridad: str = ""
@@ -86,6 +90,22 @@ def clean_code(code: str) -> str:
 
 def norm_text(x: object) -> str:
     return re.sub(r"\s+", " ", str(x or "").strip())
+
+
+def fix_encoding(s: object) -> str:
+    """Fix double-encoded UTF-8 strings (e.g. Ã­ → í, Ã± → ñ, Ã© → é).
+    Aplica encode latin-1 + decode utf-8 para revertir el patrón de corrupción
+    que ocurre cuando bytes UTF-8 se interpretaron como Latin-1."""
+    if s is None:
+        return ""
+    txt = str(s)
+    if not txt:
+        return txt
+    try:
+        fixed = txt.encode("latin-1").decode("utf-8")
+        return fixed
+    except (UnicodeEncodeError, UnicodeDecodeError):
+        return txt
 
 
 def low_ascii(x: object) -> str:
@@ -175,23 +195,29 @@ def load_bcrp_metadata(metadata_path: str = "", base_dir: str | Path = ".") -> p
 
     # Mapeo unificado basado en las nuevas especificaciones del usuario
     rename_map = {
-        "Categoría": "categoria_bcrp",
-        "Código": "codigo",
-        "Clase": "clase_serie",
-        "Grupo": "grupo_bcrp",
-        "Nombre de la serie": "nombre_bcrp",
-        "Frecuencia": "frecuencia_bcrp",
-        "Fecha de inicio de la serie": "fecha_inicio_meta",
-        "Tipo de variable": "tipo_variable",
-        "Subtipo de variable": "subtipo_variable",
-        "Ventana de variación": "ventana_variacion",
-        "Categoría operativa": "categoria_operativa",
-        "Unidad": "unidad_medida",
         "Gran categoría inferida": "categoria_bcrp",
         "Código de serie": "codigo",
-        "Categoría de serie": "clase_serie",
-        "Grupo de serie": "grupo_bcrp",
+        "Categoría de serie": "grupo_bcrp",
+        "Grupo de serie": "seccion_bcrp",
         "Nombre de serie": "nombre_bcrp",
+        "Nombre de serie ajustado": "nombre_serie_ajustado",
+        "Nombre de serie original": "nombre_original_bcrp",
+        "Medición agregada desde grupo": "medicion_agregada_desde_grupo",
+        "Regla de ajuste del nombre": "regla_ajuste_nombre",
+        "Frecuencia": "frecuencia_bcrp",
+        "unidad_inferida": "unidad_inferida",
+        "tipo_variable": "tipo_variable",
+        "subtipo_variable": "subtipo_variable",
+        "ventana_variacion": "ventana_variacion",
+        "categoria_operativa": "categoria_operativa",
+        "regla_aplicada": "regla_aplicada",
+        "confianza": "confianza_tipo_variable",
+        "requiere_revision_manual": "requiere_revision_manual",
+        "estado_fusion_clasificacion": "estado_fusion_clasificacion",
+        "Fecha de inicio": "fecha_inicio_meta",
+        "Fecha de actualización": "fecha_actualizacion_meta",
+        "Fecha de creación": "fecha_creacion_meta",
+        "Grupo de publicación": "grupo_publicacion_bcrp",
     }
     
     # Soporte para nombres alternativos (fallback)
@@ -203,30 +229,76 @@ def load_bcrp_metadata(metadata_path: str = "", base_dir: str | Path = ".") -> p
             rename_map[col] = "categoria_bcrp"
         elif key == "codigo_de_serie":
             rename_map[col] = "codigo"
-        elif key == "nombre_de_serie":
+        elif key in {"nombre_de_serie", "nombre_de_serie_actualizado"}:
             rename_map[col] = "nombre_bcrp"
-        elif key == "grupo_de_serie":
+        elif key == "nombre_de_serie_ajustado":
+            rename_map[col] = "nombre_serie_ajustado"
+        elif key == "nombre_de_serie_original":
+            rename_map[col] = "nombre_original_bcrp"
+        elif key == "categoria_de_serie":
             rename_map[col] = "grupo_bcrp"
+        elif key == "grupo_de_serie":
+            rename_map[col] = "seccion_bcrp"
+        elif key == "grupo_de_publicacion":
+            rename_map[col] = "grupo_publicacion_bcrp"
         elif key == "clase":
             rename_map[col] = "clase_serie"
+        elif key == "unidad_inferida":
+            rename_map[col] = "unidad_inferida"
+        elif key == "confianza":
+            rename_map[col] = "confianza_tipo_variable"
         elif key == "fecha_de_actualizacion":
             rename_map[col] = "fecha_actualizacion_meta"
         elif key == "fecha_de_inicio":
             rename_map[col] = "fecha_inicio_meta"
         elif key == "fecha_de_fin":
             rename_map[col] = "fecha_fin_meta"
+        elif key == "fecha_de_creacion":
+            rename_map[col] = "fecha_creacion_meta"
     
     df = df.rename(columns=rename_map)
-    
+    if df.columns.duplicated().any():
+        deduped = {}
+        for col in dict.fromkeys(df.columns):
+            same = df.loc[:, df.columns == col]
+            if same.shape[1] == 1:
+                deduped[col] = same.iloc[:, 0]
+            else:
+                deduped[col] = same.replace("", np.nan).bfill(axis=1).iloc[:, 0].fillna("")
+        df = pd.DataFrame(deduped)
+
     # Limpieza básica
     if "codigo" not in df.columns:
         return pd.DataFrame()
     df["codigo"] = df["codigo"].map(clean_code)
     df = df[df["codigo"].ne("")].copy()
-    for col in ["categoria_bcrp", "grupo_bcrp", "seccion_bcrp", "grupo_publicacion_bcrp", "nombre_bcrp", "descripcion_bcrp", "unidad_medida", "escala", "frecuencia_bcrp", "fecha_actualizacion_meta", "fecha_inicio_meta", "fecha_fin_meta"]:
+    for col in [
+        "categoria_bcrp", "grupo_bcrp", "seccion_bcrp", "grupo_publicacion_bcrp",
+        "nombre_bcrp", "nombre_original_bcrp", "nombre_serie_ajustado",
+        "medicion_agregada_desde_grupo",
+        "regla_ajuste_nombre", "descripcion_bcrp", "unidad_medida", "unidad_inferida",
+        "escala", "fuente", "frecuencia_bcrp", "fecha_creacion_meta",
+        "fecha_actualizacion_meta", "fecha_inicio_meta", "fecha_fin_meta",
+        "tipo_variable", "subtipo_variable", "ventana_variacion", "categoria_operativa",
+        "regla_aplicada", "confianza_tipo_variable", "requiere_revision_manual",
+        "estado_fusion_clasificacion",
+    ]:
         if col not in df.columns:
             df[col] = ""
-        df[col] = df[col].fillna("").map(norm_text)
+        df[col] = df[col].fillna("").map(fix_encoding).map(norm_text)
+    if {"nombre_bcrp", "nombre_serie_ajustado", "medicion_agregada_desde_grupo"}.issubset(df.columns):
+        adjusted = df["nombre_serie_ajustado"].map(low_ascii).isin({"si", "s", "yes", "true"})
+        has_measure = df["medicion_agregada_desde_grupo"].fillna("").ne("")
+        needs_measure = ~df.apply(
+            lambda row: low_ascii(row.get("medicion_agregada_desde_grupo", "")) in low_ascii(row.get("nombre_bcrp", "")),
+            axis=1,
+        )
+        mask = adjusted & has_measure & needs_measure
+        df.loc[mask, "nombre_bcrp"] = (
+            df.loc[mask, "nombre_bcrp"].str.rstrip()
+            + " "
+            + df.loc[mask, "medicion_agregada_desde_grupo"].str.strip()
+        ).map(norm_text)
     return df.drop_duplicates("codigo", keep="first")
 
 
@@ -260,7 +332,7 @@ def normalize_catalog_columns(df: pd.DataFrame) -> pd.DataFrame:
     for col in ["nombre", "frecuencia", "bloque", "uso_analitico", "tratamiento", "clase_serie", "sentido_economico", "prioridad"]:
         if col not in out.columns:
             out[col] = ""
-        out[col] = out[col].fillna("").map(norm_text)
+        out[col] = out[col].fillna("").map(fix_encoding).map(norm_text)
     out["tratamiento"] = out["tratamiento"].replace("", "auto")
     out["clase_serie"] = out["clase_serie"].replace("", "auto")
     return out.drop_duplicates("codigo", keep="first")
@@ -276,11 +348,15 @@ def merge_catalog_with_metadata(catalog: pd.DataFrame, metadata: pd.DataFrame) -
         cat["metadata_encontrado"] = False
         return cat
     cols = [
-        "codigo", "categoria_bcrp", "clase_serie", "grupo_bcrp", "seccion_bcrp", 
-        "grupo_publicacion_bcrp", "nombre_bcrp", "descripcion_bcrp", "unidad_medida", 
-        "escala", "frecuencia_bcrp", "fecha_actualizacion_meta", "fecha_inicio_meta", 
+        "codigo", "categoria_bcrp", "grupo_bcrp", "seccion_bcrp",
+        "grupo_publicacion_bcrp", "nombre_bcrp", "nombre_original_bcrp",
+        "nombre_serie_ajustado",
+        "medicion_agregada_desde_grupo", "regla_ajuste_nombre", "descripcion_bcrp",
+        "unidad_medida", "unidad_inferida", "escala", "fuente",
+        "frecuencia_bcrp", "fecha_creacion_meta", "fecha_actualizacion_meta", "fecha_inicio_meta",
         "fecha_fin_meta", "tipo_variable", "subtipo_variable", "ventana_variacion", 
-        "categoria_operativa"
+        "categoria_operativa", "regla_aplicada", "confianza_tipo_variable",
+        "requiere_revision_manual", "estado_fusion_clasificacion"
     ]
     meta = metadata[[c for c in cols if c in metadata.columns]].copy()
     out = cat.merge(meta, on="codigo", how="left")
@@ -386,7 +462,7 @@ def load_variable_classification(path: str | Path = "", base_dir: str | Path = "
         ]:
             if col not in out.columns:
                 out[col] = ""
-            out[col] = out[col].fillna("").map(norm_text)
+            out[col] = out[col].fillna("").map(fix_encoding).map(norm_text)
         mapped = out.apply(variable_classification_to_treatment, axis=1, result_type="expand")
         out["clase_serie_clasificacion"] = mapped[0]
         out["tratamiento_clasificacion"] = mapped[1]
@@ -443,7 +519,7 @@ def load_classification_overrides(path: str | Path = "") -> pd.DataFrame:
     for col in ["sentido_economico", "comentario"]:
         if col not in df.columns:
             df[col] = ""
-        df[col] = df[col].fillna("").map(norm_text)
+        df[col] = df[col].fillna("").map(fix_encoding).map(norm_text)
     keep = [c for c in ["codigo", "clase_serie", "tratamiento", "sentido_economico", "comentario"] if c in df.columns]
     return df[keep].drop_duplicates("codigo", keep="last")
 
@@ -686,7 +762,7 @@ def parse_bcrp_json(data: dict, code: str, freq_hint: str = "") -> Tuple[pd.Data
         series_code = code
         if config_series:
             s0 = config_series[0] or {}
-            meta["nombre_api"] = s0.get("name") or s0.get("nombre") or config.get("title") or code
+            meta["nombre_api"] = fix_encoding(s0.get("name") or s0.get("nombre") or config.get("title") or code)
             meta["frecuencia_api"] = s0.get("frequency") or s0.get("freq") or s0.get("frecuencia") or ""
             series_code = s0.get("dec") or s0.get("code") or s0.get("codigo") or code
         else:
@@ -733,7 +809,8 @@ def parse_bcrp_batch_json(data: dict, codes: List[str], freq_hint: str = "") -> 
     for i, s_meta in enumerate(config_series):
         if i < len(codes):
             code = codes[i]
-            results_meta[code]["nombre_api"] = s_meta.get("name") or s_meta.get("nombre") or ""
+            results_meta[code]["nombre_api"] = fix_encoding(s_meta.get("name") or s_meta.get("nombre") or "")
+
             results_meta[code]["frecuencia_api"] = s_meta.get("frequency") or ""
 
     for p in data.get("periods", []) or []:
@@ -1835,6 +1912,9 @@ def analyze_series(df_raw: pd.DataFrame, meta: SeriesMeta, api_meta: Optional[Di
         raise ValueError(f"Serie vacía para {meta.codigo}")
 
     last_date = df_t["fecha"].max()
+    # No permitir fechas futuras
+    if pd.notna(last_date) and last_date > asof_ts:
+        last_date = asof_ts
     days = int((asof_ts - last_date).days) if pd.notna(last_date) else None
     windows = class_windows(freq)
     stats = rolling_stats(df_t["valor_analisis"], windows["z"])

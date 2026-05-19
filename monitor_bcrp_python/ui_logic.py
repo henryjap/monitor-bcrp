@@ -899,9 +899,10 @@ def inject_css() -> None:
 
 def render_hero(result_df: pd.DataFrame, end_date, meta_file) -> None:
     _ = meta_file
-    # Usar la fecha real de los datos (ultima_fecha máxima), no la del análisis
+    # Usar la fecha real de los datos (ultima_fecha máxima ≤ hoy), no la del análisis
     if not result_df.empty and "ultima_fecha" in result_df.columns:
-        max_date = pd.to_datetime(result_df["ultima_fecha"], errors="coerce").max()
+        dates = pd.to_datetime(result_df["ultima_fecha"], errors="coerce")
+        max_date = dates[dates <= pd.Timestamp.today()].max()
         if pd.notna(max_date):
             effective = max_date
         else:
